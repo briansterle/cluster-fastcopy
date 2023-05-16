@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/colinmarc/hdfs"
 )
@@ -23,23 +25,39 @@ func main() {
 // Uploads the incoming byte[] to the hdfs path provided by
 // query param 'to'
 func handleUpload(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	fileName := r.URL.Query().Get("fileName")
 	to := r.URL.Query().Get("to")
 
-	if to == "" {
-		http.Error(w, "'to' query param must be provided.", http.StatusBadRequest)
+	if to == "" || fileName == "" || dir == "" {
+		http.Error(w, "'to', 'fileName', 'dir' query params must be provided.", http.StatusBadRequest)
 		return
 	}
-	client, err := hdfs.New("localhost:9000")
 
+	// create an hdfs client
+	client, err := hdfs.New("localhost:9000")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to start hdfs client: %s", err), http.StatusInternalServerError)
 		return
 	}
+	defer client.Close()
 
-	buf := make([]byte, 59)
-	r.Body.Read(buf)
-	fmt.Println(buf)
+	// create target dir
 	client.MkdirAll(to, os.FileMode(0755))
+
+	// create file
+	file, err := client.Create(filepath.Join(to, fileName))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error creating file in hdfs %s", err), http.StatusInternalServerError)
+	}
+	defer file.Close()
+
+	// write data from request body into the file
+	_, err = io.Copy(file, r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error copying request body into file %s %s", fileName, err), http.StatusInternalServerError)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
