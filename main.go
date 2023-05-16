@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/colinmarc/hdfs"
+	"github.com/colinmarc/hdfs/v2"
 )
 
 func main() {
@@ -25,11 +25,10 @@ func main() {
 // Uploads the incoming byte[] to the hdfs path provided by
 // query param 'to'
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	dir := r.URL.Query().Get("dir")
 	fileName := r.URL.Query().Get("fileName")
 	to := r.URL.Query().Get("to")
 
-	if to == "" || fileName == "" || dir == "" {
+	if to == "" || fileName == "" {
 		http.Error(w, "'to', 'fileName', 'dir' query params must be provided.", http.StatusBadRequest)
 		return
 	}
@@ -49,6 +48,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	file, err := client.Create(filepath.Join(to, fileName))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error creating file in hdfs %s", err), http.StatusInternalServerError)
+		return
 	}
 	defer file.Close()
 
@@ -56,6 +56,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	_, err = io.Copy(file, r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error copying request body into file %s %s", fileName, err), http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -70,5 +71,8 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "'from' and 'to' query params must be provided.'", http.StatusBadRequest)
 		return
 	}
+
+	// find all the files in the dir
+
 	w.WriteHeader(http.StatusOK)
 }
