@@ -2,10 +2,10 @@
 copy data between hdfs clusters blazingly fast
 
 # Motivation
-- We want the ability to transfer files in hdfs over network boundaries
-- Sometimes in enterprises there are network firewalls and partitions that prevent directly copying between clusters with a tool like HDFS
-- The application will facilitate data copies between hdfs clusters in these sort of scenarios
-- the most common use case will be copying down production data into nonprod dev/test clusters to facilitate testing
+- need the ability to copy files in hdfs across network boundaries
+- Sometimes in enterprises there are network firewalls and partitions that prevent directly copying between clusters with a tool like distcp
+- cluster-fastcopy facilitats data copies between hdfs clusters in these scenarios
+- a common use case is copying down production data into nonprod dev/test clusters to facilitate testing
 
 
 # Flow
