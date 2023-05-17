@@ -150,7 +150,7 @@ func copy(w http.ResponseWriter, r *http.Request) {
 			// Create an HTTP request
 			req, err := http.NewRequest(http.MethodPost, uploadUrl, &buf)
 			if err != nil {
-				log.Printf("Failed to create request for file '%s': %s", reader, err)
+				log.Printf("Failed to create request for file '%s': %s", file, err)
 				failure = CopyFailure{path, err.Error()}
 				return
 			}
