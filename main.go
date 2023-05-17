@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/colinmarc/hdfs/v2"
 )
@@ -29,6 +30,8 @@ type CopyResponse struct {
 	FilesRequested int64         `json:"filesRequested"`
 	FilesCopied    int64         `json:"filesCopied"`
 	CopyFailures   []CopyFailure `json:"copyFailures"`
+	Throughput     float64       `json:"throughputMbps"`
+	ElapsedSecs    float64       `json:"elapsedSecs"`
 }
 
 type CopyFailure struct {
@@ -99,6 +102,8 @@ func upload(w http.ResponseWriter, r *http.Request) {
 // Reads all files in a given directory provided by 'from'
 // and uploads them to the user provided path 'to'
 func copy(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// get params
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
@@ -178,10 +183,13 @@ func copy(w http.ResponseWriter, r *http.Request) {
 			// Set the Content-Type header
 			req.Header.Set("Content-Type", "application/octet-stream")
 
-			// Send the request to Service B
-			resp, err := http.DefaultClient.Do(req)
+			// Send the request to /upload
+			httpClient := &http.Client{
+				Timeout: 15 * time.Minute,
+			}
+			resp, err := httpClient.Do(req)
 			if err != nil {
-				log.Printf("Failed to send file '%s' to Service B: %s", file, err)
+				log.Printf("Failed to send file '%s' to /upload: %s", file, err)
 				failure = CopyFailure{path, err.Error()}
 				return
 			}
@@ -195,13 +203,14 @@ func copy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			log.Printf("File '%s' sent successfully to Service B!", file)
+			log.Printf("File '%s' sent successfully to /upload!", file)
 
 		}(fileInfo.Name())
 	}
 
 	wg.Wait()
 
+	elapsed := time.Since(start).Seconds()
 	resp := CopyResponse{
 		From:           from,
 		To:             to,
@@ -209,13 +218,16 @@ func copy(w http.ResponseWriter, r *http.Request) {
 		FilesRequested: int64(len(fileInfos)),
 		FilesCopied:    int64(len(fileInfos) - len(copyFailures)),
 		CopyFailures:   copyFailures,
+		Throughput:     (float64(writtenBytes) * 8 / elapsed) / 1000000, // conversion to mbps
+		ElapsedSecs:    elapsed,
 	}
-	json, _ := json.Marshal(resp)
-
+	json, _ := json.MarshalIndent(resp, "", "  ")
+	log.Println(string(json))
 	if len(copyFailures) > 0 {
 		http.Error(w, string(json), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("Copied %d files successfully.", resp.FilesCopied)
 	w.Write(json)
 }
 
@@ -233,6 +245,7 @@ func getHdfsClient() *hdfs.Client {
 }
 
 func main() {
+	// close the hdfs client (this is lazily loaded by the endpoints)
 	defer hdfsClient.Close()
 
 	// bind functions to routes
@@ -240,9 +253,16 @@ func main() {
 	http.HandleFunc("/upload", upload)
 	log.Println("Listening on :8080...")
 
-	// start the http server
-	e := http.ListenAndServe(":8080", nil)
-	if e != nil {
-		log.Fatalf("failed to start http server: %s", e)
+	// configure server
+	srv := &http.Server{
+		Addr:         ":8080",
+		ReadTimeout:  90 * time.Second,
+		WriteTimeout: 15 * time.Minute,
+	}
+
+	// start server
+	err := srv.ListenAndServe()
+	if err != nil {
+		log.Fatalf("failed to start http server: %s", err)
 	}
 }
