@@ -42,7 +42,7 @@ type CopyFailure struct {
 func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, error) {
 	var msg string
 
-	client := getHdfsClient()
+	client := getHdfsClient(os.Getenv("HDFS_NAMENODE"))
 
 	// create target dir
 	client.MkdirAll(to, os.FileMode(0755))
@@ -107,24 +107,24 @@ func copy(w http.ResponseWriter, r *http.Request) {
 	// get params
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
+	targetURL := r.URL.Query().Get("targetURL")
 	if from == "" || to == "" {
-		http.Error(w, "'from' and 'to' query params must be provided.'", http.StatusBadRequest)
+		http.Error(w, "'from', 'to', and 'targetURL' query params must be provided.'", http.StatusBadRequest)
 		return
 	}
 
-	client := getHdfsClient()
+	client := getHdfsClient(os.Getenv("HDFS_NAMENODE"))
 	fileInfos, err := client.ReadDir(from)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to list the hdfs dir %s", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Wait group to synchronize goroutines
 	var (
 		writtenBytes int64
 		copyFailures = make([]CopyFailure, 0)
 		mutex        sync.Mutex
-		wg           sync.WaitGroup
+		wg           sync.WaitGroup // Wait group to synchronize goroutines
 	)
 
 	for _, fileInfo := range fileInfos {
@@ -132,9 +132,7 @@ func copy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// filePath := filepath.Join(from, fileInfo.Name())
 		wg.Add(1)
-
 		go func(file string) {
 			var failure CopyFailure
 			defer func() {
@@ -169,8 +167,7 @@ func copy(w http.ResponseWriter, r *http.Request) {
 			writtenBytes += written
 			mutex.Unlock()
 
-			// Define the URL of Service B to send the file to
-			uploadUrl := "http://localhost:8080/upload?fileName=" + file + "&to=" + to
+			uploadUrl := targetURL + "?fileName=" + file + "&to=" + to
 
 			// Create an HTTP request
 			req, err := http.NewRequest(http.MethodPost, uploadUrl, &buf)
@@ -195,9 +192,9 @@ func copy(w http.ResponseWriter, r *http.Request) {
 			}
 			defer resp.Body.Close()
 
-			// Check the response from Service B
+			// Check the response /upload
 			if resp.StatusCode != http.StatusOK {
-				msg := fmt.Sprintf("Service returned non-OK status for file '%s': %d", file, resp.StatusCode)
+				msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", file, resp.StatusCode)
 				log.Println(msg)
 				failure = CopyFailure{path, msg}
 				return
@@ -208,7 +205,7 @@ func copy(w http.ResponseWriter, r *http.Request) {
 		}(fileInfo.Name())
 	}
 
-	wg.Wait()
+	wg.Wait() // wait for all goroutines to complete
 
 	elapsed := time.Since(start).Seconds()
 	resp := CopyResponse{
@@ -232,10 +229,12 @@ func copy(w http.ResponseWriter, r *http.Request) {
 }
 
 // lazy load the hdfs client
-func getHdfsClient() *hdfs.Client {
-	// namenode := os.Getenv("HDFS_HOST")
+func getHdfsClient(namenode string) *hdfs.Client {
+	if namenode == "" {
+		namenode = "localhost:9000"
+	}
 	if hdfsClient == nil {
-		client, err := hdfs.New("localhost:9000")
+		client, err := hdfs.New(namenode)
 		if err != nil {
 			log.Fatalf("failed to create hdfs client: %s", err)
 		}
