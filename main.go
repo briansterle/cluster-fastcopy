@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,18 +36,9 @@ type CopyFailure struct {
 	Reason string `json:"reason"`
 }
 
-// Uploads the incoming byte[] to the hdfs path provided by
-// query param 'to'
-func upload(w http.ResponseWriter, r *http.Request) {
-	fileName := r.URL.Query().Get("fileName")
-	to := r.URL.Query().Get("to")
+func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, error) {
+	var msg string
 
-	log.Printf("Writing %s to target: %s\n", fileName, to)
-
-	if to == "" || fileName == "" {
-		http.Error(w, "'to', 'fileName', 'dir' query params must be provided.", http.StatusBadRequest)
-		return
-	}
 	client := getHdfsClient()
 
 	// create target dir
@@ -59,20 +51,48 @@ func upload(w http.ResponseWriter, r *http.Request) {
 
 	file, err := client.Create(path)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error creating file in hdfs %s", err), http.StatusInternalServerError)
-		return
+		msg = fmt.Sprintf("Error creating file in hdfs %s", err)
+		return UploadResponse{}, errors.New(msg)
+
 	}
 	defer file.Close()
 
 	// write data from request body into the file
-	written, err := io.Copy(file, r.Body)
+	written, err := io.Copy(file, data)
 
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error copying request body into file %s %s", fileName, err), http.StatusInternalServerError)
+		msg = fmt.Sprintf("Error copying request body into file %s %s", fileName, err)
+		return UploadResponse{}, errors.New(msg)
+	}
+
+	return UploadResponse{
+		Path:    path,
+		Written: written,
+	}, nil
+}
+
+// Uploads the incoming byte[] to the hdfs path provided by
+// query param 'to'
+func upload(w http.ResponseWriter, r *http.Request) {
+	// parse params
+	fileName := r.URL.Query().Get("fileName")
+	to := r.URL.Query().Get("to")
+	if to == "" || fileName == "" {
+		http.Error(w, "'to', 'fileName', 'dir' query params must be provided.", http.StatusBadRequest)
 		return
 	}
-	resp := UploadResponse{path, written}
-	json, _ := json.Marshal(resp)
+	log.Printf("Writing %s to target: %s\n", fileName, to)
+
+	// write data from request body into the file
+	data := r.Body
+	res, err := WriteHDFS(to, fileName, data)
+	defer data.Close()
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json, _ := json.Marshal(res)
 	w.Write(json)
 }
 

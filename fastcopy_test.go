@@ -1,12 +1,59 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// random test data generator
+type RandomReadCloser struct {
+	size     int64
+	position int64
+}
+
+func (r *RandomReadCloser) Read(p []byte) (n int, err error) {
+	if r.position >= r.size {
+		return 0, io.EOF
+	}
+	remaining := r.size - r.position
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+	n, err = rand.Read(p)
+	if err != nil {
+		return n, err
+	}
+	r.position += int64(n)
+	return n, nil
+}
+
+func (r *RandomReadCloser) Close() error {
+	// Perform any cleanup if necessary
+	return nil
+}
+
+func BenchmarkCopy(b *testing.B) {
+	ans := make([]int, 0)
+
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 25; j++ {
+			size := int64(j * 1024 * 1024)
+			data := &RandomReadCloser{
+				size:     size,
+				position: 0,
+			}
+			WriteHDFS(fmt.Sprintf("/tmp/bench/%d", j), "rand.txt", data)
+		}
+
+	}
+	fmt.Println(len(ans))
+}
 
 func TestUpload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(upload))
