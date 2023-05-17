@@ -121,19 +121,19 @@ func copy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		writtenBytes int64
+		writtenBytes = make([]int64, len(fileInfos))
 		copyFailures = make([]CopyFailure, 0)
 		mutex        sync.Mutex
 		wg           sync.WaitGroup // Wait group to synchronize goroutines
 	)
 
-	for _, fileInfo := range fileInfos {
+	for i, fileInfo := range fileInfos {
 		if fileInfo.IsDir() {
 			continue
 		}
 
 		wg.Add(1)
-		go func(file string) {
+		go func(file string, i int) {
 			var failure CopyFailure
 			defer func() {
 				if failure != (CopyFailure{}) {
@@ -162,10 +162,7 @@ func copy(w http.ResponseWriter, r *http.Request) {
 				failure = CopyFailure{path, err.Error()}
 				return
 			}
-
-			mutex.Lock()
-			writtenBytes += written
-			mutex.Unlock()
+			writtenBytes[i] = written
 
 			uploadUrl := targetURL + "?fileName=" + file + "&to=" + to
 
@@ -202,20 +199,27 @@ func copy(w http.ResponseWriter, r *http.Request) {
 
 			log.Printf("File '%s' sent successfully to /upload!", file)
 
-		}(fileInfo.Name())
+		}(fileInfo.Name(), i)
 	}
 
 	wg.Wait() // wait for all goroutines to complete
 
+	// compute total bytes
+	var totalBytes int64
+	for i := 0; i < len(writtenBytes); i++ {
+		totalBytes += writtenBytes[i]
+	}
+
 	elapsed := time.Since(start).Seconds()
+
 	resp := CopyResponse{
 		From:           from,
 		To:             to,
-		Written:        writtenBytes,
+		Written:        totalBytes,
 		FilesRequested: int64(len(fileInfos)),
 		FilesCopied:    int64(len(fileInfos) - len(copyFailures)),
 		CopyFailures:   copyFailures,
-		Throughput:     (float64(writtenBytes) * 8 / elapsed) / 1000000, // conversion to mbps
+		Throughput:     (float64(totalBytes) * 8 / elapsed) / 1000000, // conversion to mbps
 		ElapsedSecs:    elapsed,
 	}
 	json, _ := json.MarshalIndent(resp, "", "  ")
