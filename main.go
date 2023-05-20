@@ -40,6 +40,7 @@ type CopyResponse struct {
 type CopyFailure struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	Size   int64  `json:"size"`
 }
 
 type CopyArgs struct {
@@ -109,14 +110,15 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Write(json)
 }
 
-func sendToUpload(targetURL string, buf *bytes.Buffer, args CopyArgs) CopyFailure {
+func sendToUpload(wg *sync.WaitGroup, targetURL string, buf *bytes.Buffer, args CopyArgs, ch chan CopyFailure, size int64) {
+	defer wg.Done()
 	uploadUrl := targetURL + "?fileName=" + args.File + "&to=" + args.To
 
 	// Create an HTTP request
 	req, err := http.NewRequest(http.MethodPost, uploadUrl, buf)
 	if err != nil {
 		log.Printf("Failed to create request for file '%s': %s", args.File, err)
-		return CopyFailure{args.Path, err.Error()}
+		ch <- CopyFailure{args.Path, err.Error(), size}
 	}
 
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -126,7 +128,7 @@ func sendToUpload(targetURL string, buf *bytes.Buffer, args CopyArgs) CopyFailur
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to send file '%s' to /upload: %s", args.File, err)
-		return CopyFailure{args.Path, err.Error()}
+		ch <- CopyFailure{args.Path, err.Error(), size}
 	}
 	defer resp.Body.Close()
 
@@ -134,10 +136,9 @@ func sendToUpload(targetURL string, buf *bytes.Buffer, args CopyArgs) CopyFailur
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", args.File, resp.StatusCode)
 		log.Println(msg)
-		return CopyFailure{args.Path, msg}
+		ch <- CopyFailure{args.Path, msg, size}
 	}
 	log.Printf("File '%s' sent successfully to /upload!", args.File)
-	return CopyFailure{}
 }
 
 // Reads all files in a given directory provided by 'from'
@@ -145,7 +146,7 @@ func sendToUpload(targetURL string, buf *bytes.Buffer, args CopyArgs) CopyFailur
 func handleCopy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// get params
+	// get query params
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	targetURL := r.URL.Query().Get("targetURL")
@@ -162,94 +163,73 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		writtenBytesCh = make(chan int64)
-		copyFailures   = make([]CopyFailure, 0)
-		mutex          sync.Mutex
-		wg             sync.WaitGroup // Wait group to synchronize goroutines
+		totalBytesWritten int64
+		copyFailuresCh    = make(chan CopyFailure)
+		wg                sync.WaitGroup // Wait group to synchronize goroutines
 	)
 
-	// compute total bytes
-	var totalBytes int64
+	// collect all copy failures
+	copyFailures := make([]CopyFailure, 0)
 	go func() {
-		for written := range writtenBytesCh {
-			totalBytes += written
+		for failure := range copyFailuresCh {
+			copyFailures = append(copyFailures, failure)
 		}
 	}()
 
-	// Define max concurrent goroutines
-	maxConcurrency := 8
-
-	// Create a buffered channel to control number of active goroutines
-	semaphore := make(chan struct{}, maxConcurrency)
-
 	for _, fileInfo := range fileInfos {
-		if fileInfo.IsDir() {
+		if fileInfo.IsDir() { // skip dirs for now
 			continue
+		}
+		file, size := fileInfo.Name(), fileInfo.Size()
+		totalBytesWritten += size // if any writes fail, we subtract at the end
+
+		args := CopyArgs{from, file, filepath.Join(from, file), to}
+
+		log.Printf("Reading from path: %s\n", args.Path)
+		reader, err := client.Open(args.Path)
+		if err != nil {
+			log.Printf("Failed to read file %s\n", file)
+
+			copyFailuresCh <- CopyFailure{args.Path, err.Error(), size}
+			return
+		}
+		defer reader.Close()
+
+		// profiling-tuned bufSize eliminates growSlices
+		bufSize := int(float64(size) * 1.0000765)
+		buf := bytes.NewBuffer(make([]byte, 0, bufSize))
+
+		_, err = io.Copy(buf, reader)
+		if err != nil {
+			log.Printf("Failed to read file '%s': %s\n", file, err)
+			copyFailuresCh <- CopyFailure{args.Path, err.Error(), size}
+			return
 		}
 
 		wg.Add(1)
-		func(file string, size int64) {
-			var failure CopyFailure
-			// Acquire semaphore slot, blocking if the max concurrency reached
-			semaphore <- struct{}{}
-			defer func() {
-				if failure != (CopyFailure{}) {
-					mutex.Lock()
-					copyFailures = append(copyFailures, failure)
-					mutex.Unlock()
-				}
-				// Release semaphore slot
-				<-semaphore
-			}()
-			defer wg.Done()
+		// send the buffer to the /upload endpoint
+		go sendToUpload(&wg, targetURL, buf, args, copyFailuresCh, size)
+	}
+	wg.Wait() // wait for all goroutines to complete
 
-			args := CopyArgs{from, file, filepath.Join(from, file), to}
-
-			log.Printf("Reading from path: %s\n", args.Path)
-			reader, err := client.Open(args.Path)
-			if err != nil {
-				log.Printf("Failed to read file %s\n", file)
-				failure = CopyFailure{args.Path, err.Error()}
-				return
-			}
-			defer reader.Close()
-
-			// profiling-tuned bufSize eliminates growSlices
-			bufSize := int(float64(size) * 1.0000765)
-			buf := bytes.NewBuffer(make([]byte, 0, bufSize))
-
-			written, err := io.Copy(buf, reader)
-			if err != nil {
-				log.Printf("Failed to read file '%s': %s\n", file, err)
-				failure = CopyFailure{args.Path, err.Error()}
-				return
-			}
-			// send the bytes to the channel
-			writtenBytesCh <- written
-
-			// send the buffer to the /upload endpoint
-			failure = sendToUpload(targetURL, buf, args)
-		}(fileInfo.Name(), fileInfo.Size())
+	for _, f := range copyFailures {
+		totalBytesWritten -= f.Size // subtract bytes from any failed copy
 	}
 
-	wg.Wait() // wait for all goroutines to complete
-	close(writtenBytesCh)
-
 	elapsed := time.Since(start).Seconds()
-
 	resp := CopyResponse{
 		From:           from,
 		To:             to,
-		Written:        totalBytes,
+		Written:        totalBytesWritten, // todo update this by subtracting bytes of copy failures
 		FilesRequested: int64(len(fileInfos)),
 		FilesCopied:    int64(len(fileInfos) - len(copyFailures)),
 		CopyFailures:   copyFailures,
-		Throughput:     (float64(totalBytes) * 8 / elapsed) / 1000000, // conversion to mbps
+		Throughput:     (float64(totalBytesWritten) * 8 / elapsed) / 1000000, // conversion to mbps
 		ElapsedSecs:    elapsed,
 	}
 	json, _ := json.MarshalIndent(resp, "", "  ")
 	log.Println(string(json))
-	if len(copyFailures) > 0 {
+	if len(copyFailuresCh) > 0 {
 		http.Error(w, string(json), http.StatusInternalServerError)
 		return
 	}
@@ -275,6 +255,8 @@ func getHdfsClient(namenode string) *hdfs.Client {
 func main() {
 	// defer profile.Start(profile.MemProfile, profile.MemProfileRate(1), profile.ProfilePath(".")).Stop()
 	// defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
+	// defer profile.Start(profile.TraceProfile, profile.ProfilePath(".")).Stop()
+
 	// close the hdfs client (this is lazily loaded by the endpoints)
 	defer hdfsClient.Close()
 
@@ -296,5 +278,4 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to start http server: %s", err)
 	}
-
 }
