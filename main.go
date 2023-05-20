@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,21 +103,22 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Error occurred writing to HDFS: %s", err)
 		return
 	}
 	json, _ := json.Marshal(res)
 	w.Write(json)
 }
 
-func sendToUpload(wg *sync.WaitGroup, targetURL string, buf *bytes.Buffer, args CopyArgs, ch chan CopyFailure, size int64) {
+func sendToUpload(reader *hdfs.FileReader, targetURL string, args CopyArgs, wg *sync.WaitGroup, ch chan CopyFailure) {
 	defer wg.Done()
 	uploadUrl := targetURL + "?fileName=" + args.File + "&to=" + args.To
 
 	// Create an HTTP request
-	req, err := http.NewRequest(http.MethodPost, uploadUrl, buf)
+	req, err := http.NewRequest(http.MethodPost, uploadUrl, reader)
 	if err != nil {
 		log.Printf("Failed to create request for file '%s': %s", args.File, err)
-		ch <- CopyFailure{args.Path, err.Error(), size}
+		ch <- CopyFailure{args.Path, err.Error(), reader.Stat().Size()}
 	}
 
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -128,7 +128,7 @@ func sendToUpload(wg *sync.WaitGroup, targetURL string, buf *bytes.Buffer, args 
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to send file '%s' to /upload: %s", args.File, err)
-		ch <- CopyFailure{args.Path, err.Error(), size}
+		ch <- CopyFailure{args.Path, err.Error(), reader.Stat().Size()}
 	}
 	defer resp.Body.Close()
 
@@ -136,9 +136,9 @@ func sendToUpload(wg *sync.WaitGroup, targetURL string, buf *bytes.Buffer, args 
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", args.File, resp.StatusCode)
 		log.Println(msg)
-		ch <- CopyFailure{args.Path, msg, size}
+		ch <- CopyFailure{args.Path, msg, reader.Stat().Size()}
 	}
-	log.Printf("File '%s' sent successfully to /upload!", args.File)
+	log.Printf("File '%s' successfully to copied to target!", args.File)
 }
 
 // Reads all files in a given directory provided by 'from'
@@ -180,35 +180,20 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		if fileInfo.IsDir() { // skip dirs for now
 			continue
 		}
-		file, size := fileInfo.Name(), fileInfo.Size()
-		totalBytesWritten += size // if any writes fail, we subtract at the end
-
-		args := CopyArgs{from, file, filepath.Join(from, file), to}
+		args := CopyArgs{from, fileInfo.Name(), filepath.Join(from, fileInfo.Name()), to}
+		totalBytesWritten += fileInfo.Size() // if any writes fail, we subtract at the end
 
 		log.Printf("Reading from path: %s\n", args.Path)
 		reader, err := client.Open(args.Path)
 		if err != nil {
-			log.Printf("Failed to read file %s\n", file)
-
-			copyFailuresCh <- CopyFailure{args.Path, err.Error(), size}
+			log.Printf("Failed to read file %s\n", args.File)
+			copyFailuresCh <- CopyFailure{args.Path, err.Error(), fileInfo.Size()}
 			return
 		}
 		defer reader.Close()
 
-		// profiling-tuned bufSize eliminates growSlices
-		bufSize := int(float64(size) * 1.0000765)
-		buf := bytes.NewBuffer(make([]byte, 0, bufSize))
-
-		_, err = io.Copy(buf, reader)
-		if err != nil {
-			log.Printf("Failed to read file '%s': %s\n", file, err)
-			copyFailuresCh <- CopyFailure{args.Path, err.Error(), size}
-			return
-		}
-
 		wg.Add(1)
-		// send the buffer to the /upload endpoint
-		go sendToUpload(&wg, targetURL, buf, args, copyFailuresCh, size)
+		go sendToUpload(reader, targetURL, args, &wg, copyFailuresCh)
 	}
 	wg.Wait() // wait for all goroutines to complete
 
@@ -220,7 +205,7 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 	resp := CopyResponse{
 		From:           from,
 		To:             to,
-		Written:        totalBytesWritten, // todo update this by subtracting bytes of copy failures
+		Written:        totalBytesWritten,
 		FilesRequested: int64(len(fileInfos)),
 		FilesCopied:    int64(len(fileInfos) - len(copyFailures)),
 		CopyFailures:   copyFailures,
