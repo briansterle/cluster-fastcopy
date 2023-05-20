@@ -17,6 +17,9 @@ import (
 )
 
 var hdfsClient *hdfs.Client
+var httpClient = &http.Client{
+	Timeout: 15 * time.Minute,
+}
 
 type UploadResponse struct {
 	Path    string `json:"path"`
@@ -37,6 +40,13 @@ type CopyResponse struct {
 type CopyFailure struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+}
+
+type CopyArgs struct {
+	From string
+	File string
+	Path string
+	To   string
 }
 
 func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, error) {
@@ -76,7 +86,7 @@ func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, 
 
 // Uploads the incoming byte[] to the hdfs path provided by
 // query param 'to'
-func upload(w http.ResponseWriter, r *http.Request) {
+func handleUpload(w http.ResponseWriter, r *http.Request) {
 	// parse params
 	fileName := r.URL.Query().Get("fileName")
 	to := r.URL.Query().Get("to")
@@ -99,9 +109,40 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	w.Write(json)
 }
 
+func sendToUpload(targetURL string, buf *bytes.Buffer, args CopyArgs) CopyFailure {
+	uploadUrl := targetURL + "?fileName=" + args.File + "&to=" + args.To
+
+	// Create an HTTP request
+	req, err := http.NewRequest(http.MethodPost, uploadUrl, buf)
+	if err != nil {
+		log.Printf("Failed to create request for file '%s': %s", args.File, err)
+		return CopyFailure{args.Path, err.Error()}
+	}
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Connection", "keep-alive")
+
+	// Send the request to /upload
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("Failed to send file '%s' to /upload: %s", args.File, err)
+		return CopyFailure{args.Path, err.Error()}
+	}
+	defer resp.Body.Close()
+
+	// Check the response /upload
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", args.File, resp.StatusCode)
+		log.Println(msg)
+		return CopyFailure{args.Path, msg}
+	}
+	log.Printf("File '%s' sent successfully to /upload!", args.File)
+	return CopyFailure{}
+}
+
 // Reads all files in a given directory provided by 'from'
 // and uploads them to the user provided path 'to'
-func copy(w http.ResponseWriter, r *http.Request) {
+func handleCopy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	// get params
@@ -121,94 +162,78 @@ func copy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		writtenBytes = make([]int64, len(fileInfos))
-		copyFailures = make([]CopyFailure, 0)
-		mutex        sync.Mutex
-		wg           sync.WaitGroup // Wait group to synchronize goroutines
+		writtenBytesCh = make(chan int64)
+		copyFailures   = make([]CopyFailure, 0)
+		mutex          sync.Mutex
+		wg             sync.WaitGroup // Wait group to synchronize goroutines
 	)
 
-	for i, fileInfo := range fileInfos {
+	// compute total bytes
+	var totalBytes int64
+	go func() {
+		for written := range writtenBytesCh {
+			totalBytes += written
+		}
+	}()
+
+	// Define max concurrent goroutines
+	maxConcurrency := 8
+
+	// Create a buffered channel to control number of active goroutines
+	semaphore := make(chan struct{}, maxConcurrency)
+
+	for _, fileInfo := range fileInfos {
 		if fileInfo.IsDir() {
 			continue
 		}
 
 		wg.Add(1)
-		go func(file string, i int) {
+		func(file string, size int64) {
 			var failure CopyFailure
+			// Acquire semaphore slot, blocking if the max concurrency reached
+			semaphore <- struct{}{}
 			defer func() {
 				if failure != (CopyFailure{}) {
 					mutex.Lock()
 					copyFailures = append(copyFailures, failure)
 					mutex.Unlock()
 				}
+				// Release semaphore slot
+				<-semaphore
 			}()
 			defer wg.Done()
 
-			path := filepath.Join(from, file)
-			log.Printf("Reading from path: %s\n", path)
-			reader, err := client.Open(path)
+			args := CopyArgs{from, file, filepath.Join(from, file), to}
+
+			log.Printf("Reading from path: %s\n", args.Path)
+			reader, err := client.Open(args.Path)
 			if err != nil {
 				log.Printf("Failed to read file %s\n", file)
-				failure = CopyFailure{path, err.Error()}
+				failure = CopyFailure{args.Path, err.Error()}
 				return
 			}
 			defer reader.Close()
 
-			// Create a buffer to store the file contents
-			var buf bytes.Buffer
-			written, err := io.Copy(&buf, reader)
+			// profiling-tuned bufSize eliminates growSlices
+			bufSize := int(float64(size) * 1.0000765)
+			buf := bytes.NewBuffer(make([]byte, 0, bufSize))
+
+			written, err := io.Copy(buf, reader)
 			if err != nil {
 				log.Printf("Failed to read file '%s': %s\n", file, err)
-				failure = CopyFailure{path, err.Error()}
+				failure = CopyFailure{args.Path, err.Error()}
 				return
 			}
-			writtenBytes[i] = written
+			// send the bytes to the channel
+			writtenBytesCh <- written
 
-			uploadUrl := targetURL + "?fileName=" + file + "&to=" + to
-
-			// Create an HTTP request
-			req, err := http.NewRequest(http.MethodPost, uploadUrl, &buf)
-			if err != nil {
-				log.Printf("Failed to create request for file '%s': %s", file, err)
-				failure = CopyFailure{path, err.Error()}
-				return
-			}
-
-			// Set the Content-Type header
-			req.Header.Set("Content-Type", "application/octet-stream")
-
-			// Send the request to /upload
-			httpClient := &http.Client{
-				Timeout: 15 * time.Minute,
-			}
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				log.Printf("Failed to send file '%s' to /upload: %s", file, err)
-				failure = CopyFailure{path, err.Error()}
-				return
-			}
-			defer resp.Body.Close()
-
-			// Check the response /upload
-			if resp.StatusCode != http.StatusOK {
-				msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", file, resp.StatusCode)
-				log.Println(msg)
-				failure = CopyFailure{path, msg}
-				return
-			}
-
-			log.Printf("File '%s' sent successfully to /upload!", file)
-
-		}(fileInfo.Name(), i)
+			// send the buffer to the /upload endpoint
+			failure = sendToUpload(targetURL, buf, args)
+		}(fileInfo.Name(), fileInfo.Size())
 	}
 
 	wg.Wait() // wait for all goroutines to complete
-
-	// compute total bytes
-	var totalBytes int64
-	for i := 0; i < len(writtenBytes); i++ {
-		totalBytes += writtenBytes[i]
-	}
+	close(writtenBytesCh)
 
 	elapsed := time.Since(start).Seconds()
 
@@ -248,19 +273,22 @@ func getHdfsClient(namenode string) *hdfs.Client {
 }
 
 func main() {
+	// defer profile.Start(profile.MemProfile, profile.MemProfileRate(1), profile.ProfilePath(".")).Stop()
+	// defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
 	// close the hdfs client (this is lazily loaded by the endpoints)
 	defer hdfsClient.Close()
 
 	// bind functions to routes
-	http.HandleFunc("/copy", copy)
-	http.HandleFunc("/upload", upload)
+	http.HandleFunc("/copy", handleCopy)
+	http.HandleFunc("/upload", handleUpload)
 	log.Println("Listening on :8080...")
 
 	// configure server
 	srv := &http.Server{
 		Addr:         ":8080",
-		ReadTimeout:  90 * time.Second,
+		ReadTimeout:  2 * time.Minute,
 		WriteTimeout: 15 * time.Minute,
+		IdleTimeout:  5 * time.Minute, // Set the idle timeout for keep-alive connections
 	}
 
 	// start server
@@ -268,4 +296,5 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to start http server: %s", err)
 	}
+
 }

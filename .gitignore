@@ -1,2 +1,4 @@
 gpt/
 .DS_store
+*.pprof
+cluster-fastcopy

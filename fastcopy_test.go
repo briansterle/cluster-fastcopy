@@ -42,13 +42,13 @@ func BenchmarkCopy(b *testing.B) {
 	ans := make([]int, 0)
 
 	for i := 0; i < b.N; i++ {
-		for j := 0; j < 69; j++ {
-			size := int64(j * 1024 * 1024)
+		for j := 0; j <= 512; j++ {
+			size := int64(1024 * 1024)
 			data := &RandomReadCloser{
 				size:     size,
 				position: 0,
 			}
-			WriteHDFS("/tmp/bench/", fmt.Sprint(j, "rand.txt"), data)
+			WriteHDFS("/tmp/bench512/", fmt.Sprint(j, "randbinary"), data)
 		}
 
 	}
@@ -56,7 +56,7 @@ func BenchmarkCopy(b *testing.B) {
 }
 
 func TestUpload(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(upload))
+	server := httptest.NewServer(http.HandlerFunc(handleUpload))
 	defer server.Close()
 	route := "/upload?to=%2Ftmp%2Fin%2F&fileName=hello6.txt"
 	req, err := http.NewRequest("POST", server.URL+route, strings.NewReader("hello, world!"))
