@@ -12,8 +12,7 @@ copy data between hdfs clusters blazingly fast
 the basic flow will be:
 
 - receive a request to copy data from cluster1 to cluster2
-- read data from hdfs cluster1 into memory 
-- batch write data into hdfs cluster2 by sending it to a microservice that resides in cluster2's network partition
+- stream data from cluster1 into hdfs cluster2 by sending a byte stream to a microservice residing in cluster2's network partition
 - make heavy use of goroutines to make this all as fast as possible
 
 
