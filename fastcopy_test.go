@@ -42,13 +42,13 @@ func BenchmarkCopy(b *testing.B) {
 	ans := make([]int, 0)
 
 	for i := 0; i < b.N; i++ {
-		for j := 0; j < 100; j++ {
-			size := int64(10 * 1024 * 1024)
+		for j := 0; j < 32; j++ {
+			size := int64(128 * 1024 * 1024)
 			data := &RandomReadCloser{
 				size:     size,
 				position: 0,
 			}
-			WriteHDFS("/tmp/bench100x10/", fmt.Sprint(j, "randbinary"), data)
+			WriteHDFS("/tmp/bench32x128/", fmt.Sprint(j, "randbinary"), data)
 		}
 
 	}

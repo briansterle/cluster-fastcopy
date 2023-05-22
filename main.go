@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/colinmarc/hdfs/v2"
+	"github.com/colinmarc/hdfs/v2/hadoopconf"
 )
 
 var hdfsClient *hdfs.Client
@@ -66,7 +67,6 @@ func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, 
 	if err != nil {
 		msg = fmt.Sprintf("Error creating file in hdfs %s", err)
 		return UploadResponse{}, errors.New(msg)
-
 	}
 	defer file.Close()
 
@@ -228,7 +228,12 @@ func getHdfsClient(namenode string) *hdfs.Client {
 		namenode = "localhost:9000"
 	}
 	if hdfsClient == nil {
-		client, err := hdfs.New(namenode)
+		conf, _ := hadoopconf.LoadFromEnvironment()
+
+		fmt.Println(conf)
+		opts := hdfs.ClientOptionsFromConf(conf)
+		opts.User = "briansterle"
+		client, err := hdfs.NewClient(opts)
 		if err != nil {
 			log.Fatalf("failed to create hdfs client: %s", err)
 		}
@@ -238,17 +243,14 @@ func getHdfsClient(namenode string) *hdfs.Client {
 }
 
 func main() {
-	// defer profile.Start(profile.MemProfile, profile.MemProfileRate(1), profile.ProfilePath(".")).Stop()
-	// defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
-	// defer profile.Start(profile.TraceProfile, profile.ProfilePath(".")).Stop()
-
+	//	defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
 	// close the hdfs client (this is lazily loaded by the endpoints)
 	defer hdfsClient.Close()
 
 	// bind functions to routes
 	http.HandleFunc("/copy", handleCopy)
 	http.HandleFunc("/upload", handleUpload)
-	log.Println("Listening on :8080...")
+	log.Println("fastcopy server listening on :8080...")
 
 	// configure server
 	srv := &http.Server{
