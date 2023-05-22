@@ -53,7 +53,7 @@ type CopyArgs struct {
 func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, error) {
 	var msg string
 
-	client := getHdfsClient(os.Getenv("HDFS_NAMENODE"))
+	client := getHdfsClient()
 
 	// create target dir
 	client.MkdirAll(to, os.FileMode(0755))
@@ -155,7 +155,7 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := getHdfsClient(os.Getenv("HDFS_NAMENODE"))
+	client := getHdfsClient()
 	fileInfos, err := client.ReadDir(from)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to list the hdfs dir %s", err), http.StatusInternalServerError)
@@ -222,14 +222,28 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 	w.Write(json)
 }
 
-// lazy load the hdfs client
-func getHdfsClient(namenode string) *hdfs.Client {
-	if namenode == "" {
-		namenode = "localhost:9000"
-	}
+// lazy loads the global hdfs.Client
+// for local testing, the env var HDFS_NAMENODE can be set (e.g. export HDFS_NAMENODE=localhost:9000)
+// for production use with Kerberos, set $HADOOP_CONF_DIR to point at a dir with hdfs-site.xml and core-site.xml fie
+// for kerberos props, set env vars RUNAS_USER to configure the kerberos principal and RUNAS_KEYTAB to configure the
+// keytab to use for authentication
+func getHdfsClient() *hdfs.Client {
 	if hdfsClient == nil {
+		namenode := os.Getenv("HDFS_NAMENODE") // for basic local testing, set this env var
+		fmt.Println(namenode)
+		if namenode != "" {
+			client, err := hdfs.New(namenode)
+			if err != nil {
+				log.Fatalf("failed to create hdfs client: %s", err)
+			}
+			hdfsClient = client
+			return hdfsClient
+		}
+
 		conf, _ := hadoopconf.LoadFromEnvironment()
 
+		conf["dfs.namenode.kerberos.principal"] = os.Getenv("RUNAS_USER")
+		conf["dfs.namenode.keytab.file"] = os.Getenv("RUNAS_KEYTAB")
 		fmt.Println(conf)
 		opts := hdfs.ClientOptionsFromConf(conf)
 		opts.User = "briansterle"
@@ -248,7 +262,7 @@ func main() {
 	defer hdfsClient.Close()
 
 	// bind functions to routes
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{\"status\":\"200 OK\"}")) })
 	http.HandleFunc("/copy", handleCopy)
 	http.HandleFunc("/upload", handleUpload)
 	log.Println("fastcopy server listening on :8080...")
