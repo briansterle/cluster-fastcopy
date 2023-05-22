@@ -248,6 +248,7 @@ func main() {
 	defer hdfsClient.Close()
 
 	// bind functions to routes
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	http.HandleFunc("/copy", handleCopy)
 	http.HandleFunc("/upload", handleUpload)
 	log.Println("fastcopy server listening on :8080...")
