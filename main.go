@@ -243,7 +243,9 @@ func getHdfsClient() *hdfs.Client {
 			return hdfsClient
 		}
 		conf, _ := hadoopconf.LoadFromEnvironment()
-
+		for key, val := range conf {
+			fmt.Printf("%s -> %s\n", key, val)
+		}
 		//		conf["dfs.namenode.kerberos.principal"] = os.Getenv("RUNAS_USER")
 		//		conf["dfs.namenode.keytab.file"] = os.Getenv("RUNAS_KEYTAB")
 
@@ -251,11 +253,12 @@ func getHdfsClient() *hdfs.Client {
 		if os.Getenv("KRB_ENABLED") == "true" {
 			opts.KerberosClient = makeKerberosClient()
 		}
-
+		fmt.Printf("opts: %v\n", opts)
 		client, err := hdfs.NewClient(opts)
 		if err != nil {
 			log.Fatalf("failed to create hdfs client: %s", err)
 		}
+
 		hdfsClient = client
 	}
 	return hdfsClient
