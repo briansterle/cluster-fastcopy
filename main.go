@@ -14,6 +14,9 @@ import (
 
 	"github.com/colinmarc/hdfs/v2"
 	"github.com/colinmarc/hdfs/v2/hadoopconf"
+	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/config"
+	"github.com/jcmturner/gokrb5/v8/keytab"
 )
 
 var hdfsClient *hdfs.Client
@@ -239,14 +242,16 @@ func getHdfsClient() *hdfs.Client {
 			hdfsClient = client
 			return hdfsClient
 		}
-
 		conf, _ := hadoopconf.LoadFromEnvironment()
 
-		conf["dfs.namenode.kerberos.principal"] = os.Getenv("RUNAS_USER")
-		conf["dfs.namenode.keytab.file"] = os.Getenv("RUNAS_KEYTAB")
-		fmt.Println(conf)
+		//		conf["dfs.namenode.kerberos.principal"] = os.Getenv("RUNAS_USER")
+		//		conf["dfs.namenode.keytab.file"] = os.Getenv("RUNAS_KEYTAB")
+
 		opts := hdfs.ClientOptionsFromConf(conf)
-		opts.User = "briansterle"
+		if os.Getenv("KRB_ENABLED") == "true" {
+			opts.KerberosClient = makeKerberosClient()
+		}
+
 		client, err := hdfs.NewClient(opts)
 		if err != nil {
 			log.Fatalf("failed to create hdfs client: %s", err)
@@ -254,6 +259,15 @@ func getHdfsClient() *hdfs.Client {
 		hdfsClient = client
 	}
 	return hdfsClient
+}
+
+// make a kerberos client. reads from env for configs.
+func makeKerberosClient() *client.Client {
+	kt, _ := keytab.Load(os.Getenv("KRB_KEYTAB"))
+	file, _ := os.Open("/etc/krb5.conf")
+	defer file.Close()
+	krb5conf, _ := config.NewFromReader(file)
+	return client.NewWithKeytab(os.Getenv("KRB_USER"), os.Getenv("KRB_REALM"), kt, krb5conf)
 }
 
 func main() {
