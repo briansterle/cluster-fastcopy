@@ -55,15 +55,10 @@ type CopyArgs struct {
 
 func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, error) {
 	var msg string
-
 	client := getHdfsClient()
-
-	// create target dir
 	client.MkdirAll(to, os.FileMode(0755))
 
-	// create file
 	path := filepath.Join(to, fileName)
-	// write data from request body into the file
 	client.Remove(path) // Truncate the file to 0 bytes
 
 	file, err := client.Create(path)
@@ -73,9 +68,7 @@ func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, 
 	}
 	defer file.Close()
 
-	// write data from request body into the file
 	written, err := io.Copy(file, data)
-
 	if err != nil {
 		msg = fmt.Sprintf("Error copying request body into file %s %s", fileName, err)
 		return UploadResponse{}, errors.New(msg)
@@ -87,10 +80,9 @@ func WriteHDFS(to string, fileName string, data io.ReadCloser) (UploadResponse, 
 	}, nil
 }
 
-// Uploads the incoming byte[] to the hdfs path provided by
-// query param 'to'
+// Uploads the incoming []byte to the hdfs path provided by
+// query param 'to' and file provided by param 'fileName'
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	// parse params
 	fileName := r.URL.Query().Get("fileName")
 	to := r.URL.Query().Get("to")
 	if to == "" || fileName == "" {
@@ -99,7 +91,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Writing %s to target: %s\n", fileName, to)
 
-	// write data from request body into the file
 	data := r.Body
 	res, err := WriteHDFS(to, fileName, data)
 	defer data.Close()
@@ -117,7 +108,6 @@ func sendToUpload(reader *hdfs.FileReader, targetURL string, args CopyArgs, wg *
 	defer wg.Done()
 	uploadUrl := targetURL + "?fileName=" + args.File + "&to=" + args.To
 
-	// Create an HTTP request
 	req, err := http.NewRequest(http.MethodPost, uploadUrl, reader)
 	if err != nil {
 		log.Printf("Failed to create request for file '%s': %s", args.File, err)
@@ -127,7 +117,6 @@ func sendToUpload(reader *hdfs.FileReader, targetURL string, args CopyArgs, wg *
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Connection", "keep-alive")
 
-	// Send the request to /upload
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to send file '%s' to /upload: %s", args.File, err)
@@ -135,7 +124,6 @@ func sendToUpload(reader *hdfs.FileReader, targetURL string, args CopyArgs, wg *
 	}
 	defer resp.Body.Close()
 
-	// Check the response /upload
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("/upload returned non-OK status for file '%s': %d", args.File, resp.StatusCode)
 		log.Println(msg)
@@ -171,7 +159,6 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		wg                sync.WaitGroup // Wait group to synchronize goroutines
 	)
 
-	// collect all copy failures
 	copyFailures := make([]CopyFailure, 0)
 	go func() {
 		for failure := range copyFailuresCh {
@@ -198,10 +185,10 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go sendToUpload(reader, targetURL, args, &wg, copyFailuresCh)
 	}
-	wg.Wait() // wait for all goroutines to complete
+	wg.Wait()
 
 	for _, f := range copyFailures {
-		totalBytesWritten -= f.Size // subtract bytes from any failed copy
+		totalBytesWritten -= f.Size
 	}
 
 	elapsed := time.Since(start).Seconds()
@@ -275,16 +262,13 @@ func makeKerberosClient() *client.Client {
 
 func main() {
 	//	defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
-	// close the hdfs client (this is lazily loaded by the endpoints)
 	defer hdfsClient.Close()
 
-	// bind functions to routes
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{\"status\":\"200 OK\"}")) })
 	http.HandleFunc("/copy", handleCopy)
 	http.HandleFunc("/upload", handleUpload)
 	log.Println("fastcopy server listening on :8080...")
 
-	// configure server
 	srv := &http.Server{
 		Addr:         ":8080",
 		ReadTimeout:  2 * time.Minute,
@@ -292,7 +276,6 @@ func main() {
 		IdleTimeout:  5 * time.Minute, // Set the idle timeout for keep-alive connections
 	}
 
-	// start server
 	err := srv.ListenAndServe()
 	if err != nil {
 		log.Fatalf("failed to start http server: %s", err)
