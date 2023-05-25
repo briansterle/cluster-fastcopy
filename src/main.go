@@ -131,8 +131,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 // and uploads them to the user provided path 'to'
 func handleCopy(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-
-	// get query params
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	targetURL := r.URL.Query().Get("targetURL")
@@ -162,12 +160,11 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for _, fileInfo := range fileInfos {
-		if fileInfo.IsDir() { // skip dirs for now
+		if fileInfo.IsDir() {
 			continue
 		}
 		args := CopyArgs{from, fileInfo.Name(), filepath.Join(from, fileInfo.Name()), to}
 		totalBytesWritten += fileInfo.Size()
-
 		log.Printf("Reading from path: %s\n", args.Path)
 		reader, err := client.Open(args.Path)
 		if err != nil {
@@ -176,7 +173,6 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer reader.Close()
-
 		wg.Add(1)
 		go sendToUpload(reader, targetURL, args, &wg, copyFailuresCh)
 	}
@@ -208,7 +204,6 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	//	defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
 	defer HdfsClient.Close()
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{\"status\":\"200 OK\"}")) })
