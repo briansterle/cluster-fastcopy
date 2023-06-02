@@ -2,3 +2,4 @@
 *.pprof
 cluster-fastcopy
 *.out
+bin

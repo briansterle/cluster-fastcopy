@@ -1,4 +1,4 @@
-module briansterle/cluster-fastcopy
+module github.com/briansterle/cluster-fastcopy
 
 go 1.20
 
